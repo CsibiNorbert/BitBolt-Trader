@@ -388,10 +388,10 @@
     private string priceChangePercent = "0.00";
     private string priceChangeClass = "text-muted";
     private decimal volume24h = 0m;
-    private DateTime lastUpdateTime = DateTime.MinValue;
+    private DateTime lastUpdateTime = DateTime.Now;
     
     // Connection Status
-    private string connectionStatusClass = "text-secondary";
+    private string connectionStatusClass = "text-warning";
     private string connectionStatusText = "Connecting...";
     
     // Bot State
@@ -442,24 +442,56 @@
     
     protected override async Task OnInitializedAsync()
     {
-        Logger.LogInformation("Initializing dashboard with C# Binance integration...");
+        Logger.LogInformation("Initializing BitBolt Trader dashboard...");
         
         try
         {
-            // Setup SignalR connection for real-time updates
-            await SetupSignalRConnection();
+            // Set initial connection status
+            connectionStatusClass = "text-warning";
+            connectionStatusText = "Connecting...";
+            lastUpdateTime = DateTime.Now;
             
-            // Load initial data from C# backend
-            await LoadInitialData();
+            // Start async initialization - don't block UI
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    // Setup SignalR connection in background
+                    await SetupSignalRConnection();
+                    
+                    // Load initial data from C# backend
+                    await LoadInitialDataAsync();
+                    
+                    _isInitialized = true;
+                    
+                    // Update UI on main thread
+                    await InvokeAsync(StateHasChanged);
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError(ex, "Background initialization failed");
+                    connectionStatusClass = "text-danger";
+                    connectionStatusText = "Failed";
+                    currentSignal = "ERROR";
+                    signalReason = "Initialization failed: " + ex.Message;
+                    signalBadgeClass = "bg-danger";
+                    
+                    await InvokeAsync(StateHasChanged);
+                }
+            });
             
-            _isInitialized = true;
+            // Set initial values for immediate display
+            connectionStatusClass = "text-warning";
+            connectionStatusText = "Connecting...";
+            currentSignal = "INITIALIZING";
+            signalReason = "Starting BitBolt Trader...";
+            signalBadgeClass = "bg-warning";
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Failed to initialize dashboard");
-            currentSignal = "ERROR";
-            signalReason = "Failed to initialize: " + ex.Message;
-            signalBadgeClass = "bg-danger";
+            Logger.LogError(ex, "Failed to start initialization");
+            connectionStatusClass = "text-danger";
+            connectionStatusText = "Failed";
         }
     }
     
@@ -468,26 +500,47 @@
         if (firstRender)
         {
             _isRendered = true;
+            Logger.LogInformation("BitBolt Trader UI rendered, initializing components...");
             
             try
             {
-                // Initialize minimal charts (JS interop) - safe to call here
-                await JSRuntime.InvokeVoidAsync("minimalTradingDashboard.initialize");
-                _jsAvailable = true;
-                
-                // Load and display initial chart data
-                await LoadHistoricalData();
-                
-                // Now it's safe to start timers since JS is available
+                // Start timers immediately for data updates - don't wait for JS
                 StartTimers();
                 
-                isLoadingChart = false;
-                StateHasChanged();
+                // Initialize minimal charts (JS interop) in background
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(100); // Small delay to ensure DOM is ready
+                        await JSRuntime.InvokeVoidAsync("minimalTradingDashboard.initialize");
+                        _jsAvailable = true;
+                        
+                        // Load and display initial chart data
+                        await LoadHistoricalData();
+                        
+                        isLoadingChart = false;
+                        await InvokeAsync(StateHasChanged);
+                        
+                        Logger.LogInformation("BitBolt Trader charts initialized");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError(ex, "Failed to initialize charts in background");
+                        _jsAvailable = false;
+                        isLoadingChart = false;
+                        await InvokeAsync(StateHasChanged);
+                    }
+                });
+                
+                Logger.LogInformation("BitBolt Trader components initialization started");
             }
             catch (Exception ex)
             {
-                Logger.LogError(ex, "Failed to initialize charts");
+                Logger.LogError(ex, "Failed to start component initialization");
                 _jsAvailable = false;
+                isLoadingChart = false;
+                StateHasChanged();
             }
         }
     }
@@ -495,15 +548,44 @@
     private void StartTimers()
     {
         // Setup timers for periodic updates - only after component is fully rendered
-        _dataRefreshTimer = new Timer(async _ => await RefreshMarketData(), null, TimeSpan.Zero, TimeSpan.FromSeconds(3));
-        _chartUpdateTimer = new Timer(async _ => await UpdateChartData(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+        // Start immediately (TimeSpan.Zero) then refresh every 2 seconds for faster updates
+        _dataRefreshTimer = new Timer(async _ => 
+        {
+            try
+            {
+                await RefreshMarketData();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Timer-based market data refresh failed");
+            }
+        }, null, TimeSpan.Zero, TimeSpan.FromSeconds(2));
+        
+        // Chart updates every 3 seconds instead of 5 for more responsive UI
+        _chartUpdateTimer = new Timer(async _ => 
+        {
+            try
+            {
+                await UpdateChartData();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Timer-based chart update failed");
+            }
+        }, null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
+        
+        Logger.LogInformation("BitBolt Trader timers started - 2s market data, 3s chart updates");
     }
     
-    private async Task LoadInitialData()
+    private async Task LoadInitialDataAsync()
     {
         try
         {
-            Logger.LogInformation("Loading initial market data from C# backend...");
+            Logger.LogInformation("Loading initial market data from BitBolt backend...");
+            
+            // Update connection status to show we're loading
+            connectionStatusClass = "text-info";
+            connectionStatusText = "Loading...";
             
             // Load initial bot status
             if (BotControlService != null)
@@ -520,10 +602,14 @@
             
             // Load initial market data from C# API
             await RefreshMarketData();
+            
+            Logger.LogInformation("Initial data loaded successfully");
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Failed to load initial data");
+            connectionStatusClass = "text-danger";
+            connectionStatusText = "Error";
         }
     }
     
@@ -531,9 +617,9 @@
     {
         try
         {
-            // Fetch market data from C# backend API
+            // Fetch market data from BitBolt backend API
             var response = await Http.GetFromJsonAsync<MarketDataResponse>($"/api/dashboard/market-data/BTCUSDT");
-            if (response != null)
+            if (response != null && response.Price > 0)
             {
                 currentPrice = response.Price;
                 volume24h = response.Volume;
@@ -541,17 +627,37 @@
                 priceChangeClass = response.ChangePercent24h >= 0 ? "text-success" : "text-danger";
                 lastUpdateTime = DateTime.Now;
                 
-                // Update connection status
+                // Update connection status to show we're connected
                 connectionStatusClass = "text-success";
                 connectionStatusText = "Connected";
                 
                 // Calculate indicators (placeholder - should be calculated by backend)
                 await CalculateIndicators(currentPrice);
                 
+                // Only update UI if component is rendered
                 if (_isRendered)
                 {
                     await InvokeAsync(StateHasChanged);
                 }
+                
+                Logger.LogDebug($"Market data updated: BTC ${currentPrice:N2}");
+            }
+            else
+            {
+                Logger.LogWarning("Received empty or invalid market data response");
+                connectionStatusClass = "text-warning";
+                connectionStatusText = "No Data";
+            }
+        }
+        catch (HttpRequestException httpEx)
+        {
+            Logger.LogError(httpEx, "Network error while fetching market data");
+            connectionStatusClass = "text-danger";
+            connectionStatusText = "Network Error";
+            
+            if (_isRendered)
+            {
+                await InvokeAsync(StateHasChanged);
             }
         }
         catch (Exception ex)
@@ -559,6 +665,11 @@
             Logger.LogError(ex, "Failed to refresh market data");
             connectionStatusClass = "text-danger";
             connectionStatusText = "Disconnected";
+            
+            if (_isRendered)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
         }
     }
     
