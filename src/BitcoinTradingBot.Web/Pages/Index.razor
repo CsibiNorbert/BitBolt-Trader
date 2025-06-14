@@ -1,0 +1,899 @@
+﻿@page "/"
+@using BitcoinTradingBot.Core.Models
+@using BitcoinTradingBot.Core
+@using BitcoinTradingBot.Web.Services
+@using Microsoft.AspNetCore.SignalR.Client
+@using System.Text.Json
+@inject IJSRuntime JSRuntime
+@inject NavigationManager Navigation
+@inject ITradingBotControlService BotControlService
+@inject ILogger<Index> Logger
+@inject IServiceScopeFactory ServiceScopeFactory
+@inject HttpClient Http
+@implements IAsyncDisposable
+
+<PageTitle>Bitcoin Trading Bot - Keltner Channel Strategy</PageTitle>
+
+<div class="trading-dashboard">
+    <!-- Header -->
+    <div class="row mb-3">
+        <div class="col-12">
+            <div class="card bg-dark text-white">
+                <div class="card-body py-2">
+                    <div class="row align-items-center">
+                        <div class="col-md-3">
+                            <h4 class="mb-0">
+                                <i class="fas fa-chart-line me-2"></i>
+                                BTC Trading Bot
+                            </h4>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="row text-center">
+                                <div class="col-4">
+                                    <small class="text-muted">Current Price</small>
+                                    <div class="h5 mb-0 @(priceChangeClass)">
+                                        $@currentPrice.ToString("N2")
+                                        <small class="ms-1">@priceChangePercent%</small>
+                                    </div>
+                                </div>
+                                <div class="col-4">
+                                    <small class="text-muted">24h Volume</small>
+                                    <div class="h6 mb-0">@volume24h.ToString("N2") BTC</div>
+                                </div>
+                                <div class="col-4">
+                                    <small class="text-muted">Bot Status</small>
+                                    <div class="h6 mb-0">
+                                        <span class="badge @(isBotRunning ? "bg-success" : "bg-secondary")">
+                                            @(isBotRunning ? "ACTIVE" : "STOPPED")
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3 text-end">
+                            <div class="d-flex justify-content-end align-items-center">
+                                <div id="connection-status" class="connection-status me-3">
+                                    <i class="status-icon fas fa-circle @connectionStatusClass"></i>
+                                    <small class="status-text ms-1">@connectionStatusText</small>
+                                </div>
+                                <small class="text-muted">Last Update: @lastUpdateTime.ToString("HH:mm:ss")</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="row">
+        <!-- Chart Section -->
+        <div class="col-lg-8">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">
+                        <i class="fas fa-chart-candlestick me-2"></i>
+                        BTC/USDT - Multi-Timeframe Analysis
+                    </h5>
+                    <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn @(selectedTimeframe == "5M" ? "btn-primary" : "btn-outline-primary")" 
+                                @onclick="Select5M">5M</button>
+                        <button type="button" class="btn @(selectedTimeframe == "1H" ? "btn-primary" : "btn-outline-primary")" 
+                                @onclick="Select1H">1H</button>
+                        <button type="button" class="btn @(selectedTimeframe == "4H" ? "btn-primary" : "btn-outline-primary")" 
+                                @onclick="Select4H">4H</button>
+                        <button type="button" class="btn btn-outline-secondary" @onclick="RefreshChart">
+                            <i class="fas fa-sync"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <!-- Chart Container -->
+                    <div id="tradingChart" style="height: 500px; width: 100%; position: relative;">
+                        <canvas id="tradingChartCanvas" style="width: 100%; height: 100%;"></canvas>
+                        @if (isLoadingChart)
+                        {
+                            <div id="chartLoadingSpinner" class="d-flex justify-content-center align-items-center h-100" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9);">
+                                <div class="text-center">
+                                    <div class="spinner-border text-primary mb-3" role="status">
+                                        <span class="visually-hidden">Loading chart...</span>
+                                    </div>
+                                    <p class="text-muted">Loading @selectedTimeframe chart data from Binance...</p>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            <!-- Indicators Panel -->
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h6 class="mb-0">
+                        <i class="fas fa-signal me-2"></i>
+                        Live Indicators (@selectedTimeframe) - Real-time from Binance
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-3">
+                            <div class="indicator-box">
+                                <small class="text-muted">Keltner Channel</small>
+                                <div class="mt-1">
+                                    <div class="small">Upper: <span class="text-danger">$@kcUpper.ToString("N2")</span></div>
+                                    <div class="small">Middle: <span class="text-warning">$@kcMiddle.ToString("N2")</span></div>
+                                    <div class="small">Lower: <span class="text-success">$@kcLower.ToString("N2")</span></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="indicator-box">
+                                <small class="text-muted">EMA 20</small>
+                                <div class="h6 mt-1 mb-0 @(emaDirection == "up" ? "text-success" : "text-danger")">
+                                    $@ema20.ToString("N2")
+                                    <i class="fas fa-arrow-@(emaDirection == "up" ? "up" : "down") ms-1"></i>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="indicator-box">
+                                <small class="text-muted">ATR (14)</small>
+                                <div class="h6 mt-1 mb-0">
+                                    $@atr.ToString("N2")
+                                    <small class="text-muted">(@atrPercent.ToString("N2")%)</small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="indicator-box">
+                                <small class="text-muted">Signal Status</small>
+                                <div class="mt-1">
+                                    <span class="badge @signalBadgeClass fs-6">@currentSignal</span>
+                                    @if (!string.IsNullOrEmpty(signalReason))
+                                    {
+                                        <div class="small text-muted mt-1">@signalReason</div>
+                                    }
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Control Panel -->
+        <div class="col-lg-4">
+            <!-- Bot Controls -->
+            <div class="card">
+                <div class="card-header">
+                    <h6 class="mb-0">
+                        <i class="fas fa-cogs me-2"></i>
+                        Bot Control Panel
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <!-- Main Control Button -->
+                    <div class="d-grid mb-3">
+                        <button class="btn @(isBotRunning ? "btn-danger" : "btn-success") btn-lg" 
+                                @onclick="ToggleBot" disabled="@isToggling">
+                            @if (isToggling)
+                            {
+                                <span class="spinner-border spinner-border-sm me-2" role="status"></span>
+                            }
+                            else
+                            {
+                                <i class="fas fa-@(isBotRunning ? "stop" : "play") me-2"></i>
+                            }
+                            @(isBotRunning ? "Stop Bot" : "Start Bot")
+                        </button>
+                    </div>
+
+                    <!-- Trading Parameters -->
+                    <div class="mb-3">
+                        <label class="form-label small">Position Size (BTC)</label>
+                        <div class="input-group input-group-sm">
+                            <input type="number" class="form-control" @bind="positionSize" 
+                                   step="0.001" min="0.001" max="1.0" disabled="@isBotRunning" />
+                            <span class="input-group-text">BTC</span>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label small">Risk Per Trade (%)</label>
+                        <div class="input-group input-group-sm">
+                            <input type="number" class="form-control" @bind="riskPerTrade" 
+                                   step="0.1" min="0.1" max="5.0" disabled="@isBotRunning" />
+                            <span class="input-group-text">%</span>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" @bind="paperTradingMode" 
+                                   disabled="@isBotRunning" id="paperTradingSwitch">
+                            <label class="form-check-label small" for="paperTradingSwitch">
+                                Paper Trading Mode
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Emergency Stop -->
+                    <div class="d-grid">
+                        <button class="btn btn-outline-danger btn-sm" @onclick="EmergencyStop" 
+                                disabled="@(!isBotRunning)">
+                            <i class="fas fa-exclamation-triangle me-1"></i>
+                            Emergency Stop
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Performance Metrics -->
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h6 class="mb-0">
+                        <i class="fas fa-chart-bar me-2"></i>
+                        Performance Metrics (Real-time)
+                    </h6>
+                </div>
+                <div class="card-body performance-metrics">
+                    <div class="row text-center">
+                        <div class="col-6 mb-3">
+                            <small class="text-muted">Today's P&L</small>
+                            <div class="h5 @(dailyPnl >= 0 ? "text-success" : "text-danger")">
+                                @(dailyPnl >= 0 ? "+" : "")@dailyPnl.ToString("N4") BTC
+                            </div>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <small class="text-muted">Win Rate</small>
+                            <div class="h5 text-info">@winRate.ToString("N1")%</div>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <small class="text-muted">Total Trades</small>
+                            <div class="h6">@totalTrades</div>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <small class="text-muted">Max Drawdown</small>
+                            <div class="h6 text-warning">@maxDrawdown.ToString("N2")%</div>
+                        </div>
+                    </div>
+
+                    <!-- Equity Curve Mini Chart -->
+                    <div class="mt-3">
+                        <small class="text-muted">Equity Curve (Real-time)</small>
+                        <div id="equityChart" style="height: 50px; width: 100%; position: relative;">
+                            <canvas id="equityChartCanvas" style="width: 100%; height: 100%;"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recent Signals -->
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h6 class="mb-0">
+                        <i class="fas fa-list me-2"></i>
+                        Recent Signals (Live)
+                    </h6>
+                </div>
+                <div class="card-body p-0">
+                    <div class="list-group list-group-flush signals-container">
+                        @foreach (var signal in recentSignals.Take(5))
+                        {
+                            <div class="list-group-item list-group-item-action py-2">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <span class="badge @(signal.Type == "BUY" ? "bg-success" : signal.Type == "SELL" ? "bg-danger" : "bg-secondary") me-2">
+                                            @signal.Type
+                                        </span>
+                                        <small>$@signal.Price.ToString("N2")</small>
+                                    </div>
+                                    <small class="text-muted">@signal.Time.ToString("HH:mm")</small>
+                                </div>
+                                @if (!string.IsNullOrEmpty(signal.Reason))
+                                {
+                                    <small class="text-muted">@signal.Reason</small>
+                                }
+                            </div>
+                        }
+                        @if (!recentSignals.Any())
+                        {
+                            <div class="list-group-item text-center text-muted py-3">
+                                <i class="fas fa-clock me-2"></i>
+                                Waiting for Binance signals...
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Custom Styles -->
+<style>
+    .trading-dashboard {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    }
+    
+    .indicator-box {
+        padding: 0.5rem;
+        border-left: 3px solid #007bff;
+        background-color: #f8f9fa;
+        border-radius: 0.25rem;
+    }
+    
+    .card {
+        box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+        border: 1px solid rgba(0, 0, 0, 0.125);
+    }
+    
+    .card-header {
+        background-color: #f8f9fa;
+        border-bottom: 1px solid rgba(0, 0, 0, 0.125);
+    }
+    
+    #tradingChart {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 0.25rem;
+    }
+    
+    .performance-metrics .row {
+        min-height: 120px;
+    }
+    
+    .performance-metrics .col-6 {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        text-align: center;
+    }
+    
+    #equityChart {
+        max-height: 50px;
+        width: 100% !important;
+        height: 50px !important;
+    }
+    
+    .card-body {
+        min-height: 100px;
+    }
+    
+    .signals-container {
+        max-height: 200px;
+        overflow-y: auto;
+        min-height: 150px;
+    }
+    
+    .connection-status .text-success {
+        color: #28a745 !important;
+    }
+    
+    .connection-status .text-warning {
+        color: #ffc107 !important;
+    }
+    
+    .connection-status .text-danger {
+        color: #dc3545 !important;
+    }
+</style>
+
+@code {
+    // SignalR Connection
+    private HubConnection? hubConnection;
+    
+    // Market Data - Now real-time from Binance via C# backend
+    private decimal currentPrice = 0m;
+    private string priceChangePercent = "0.00";
+    private string priceChangeClass = "text-muted";
+    private decimal volume24h = 0m;
+    private DateTime lastUpdateTime = DateTime.MinValue;
+    
+    // Connection Status
+    private string connectionStatusClass = "text-secondary";
+    private string connectionStatusText = "Connecting...";
+    
+    // Bot State
+    private bool isBotRunning = false;
+    private bool isToggling = false;
+    private bool isLoadingChart = true;
+    private decimal positionSize = 0.01m;
+    private decimal riskPerTrade = 2.0m;
+    private bool paperTradingMode = true;
+    
+    // Chart State
+    private string selectedTimeframe = "5M";
+    private Timer? _dataRefreshTimer;
+    private Timer? _chartUpdateTimer;
+    
+    // Indicators - Real-time calculated from Binance data
+    private decimal kcUpper = 0m;
+    private decimal kcMiddle = 0m;
+    private decimal kcLower = 0m;
+    private decimal ema20 = 0m;
+    private string emaDirection = "unknown";
+    private decimal atr = 0m;
+    private decimal atrPercent = 0m;
+    private string currentSignal = "INITIALIZING";
+    private string signalReason = "Connecting to Binance data feed...";
+    private string signalBadgeClass = "bg-secondary";
+    
+    // Performance - Real-time from trading system
+    private decimal dailyPnl = 0m;
+    private decimal winRate = 0m;
+    private int totalTrades = 0;
+    private decimal maxDrawdown = 0m;
+    
+    // Recent Signals - Real from strategy engine
+    private List<SignalData> recentSignals = new();
+    
+    // Chart data
+    private List<string> chartTimestamps = new();
+    private List<decimal> chartPrices = new();
+    private List<decimal> chartKcUpper = new();
+    private List<decimal> chartKcMiddle = new();
+    private List<decimal> chartKcLower = new();
+    
+    // Component lifecycle state
+    private bool _isInitialized = false;
+    private bool _isRendered = false;
+    private bool _jsAvailable = false;
+    
+    protected override async Task OnInitializedAsync()
+    {
+        Logger.LogInformation("Initializing dashboard with C# Binance integration...");
+        
+        try
+        {
+            // Setup SignalR connection for real-time updates
+            await SetupSignalRConnection();
+            
+            // Load initial data from C# backend
+            await LoadInitialData();
+            
+            _isInitialized = true;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to initialize dashboard");
+            currentSignal = "ERROR";
+            signalReason = "Failed to initialize: " + ex.Message;
+            signalBadgeClass = "bg-danger";
+        }
+    }
+    
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _isRendered = true;
+            
+            try
+            {
+                // Initialize minimal charts (JS interop) - safe to call here
+                await JSRuntime.InvokeVoidAsync("minimalTradingDashboard.initialize");
+                _jsAvailable = true;
+                
+                // Load and display initial chart data
+                await LoadHistoricalData();
+                
+                // Now it's safe to start timers since JS is available
+                StartTimers();
+                
+                isLoadingChart = false;
+                StateHasChanged();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to initialize charts");
+                _jsAvailable = false;
+            }
+        }
+    }
+    
+    private void StartTimers()
+    {
+        // Setup timers for periodic updates - only after component is fully rendered
+        _dataRefreshTimer = new Timer(async _ => await RefreshMarketData(), null, TimeSpan.Zero, TimeSpan.FromSeconds(3));
+        _chartUpdateTimer = new Timer(async _ => await UpdateChartData(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+    
+    private async Task LoadInitialData()
+    {
+        try
+        {
+            Logger.LogInformation("Loading initial market data from C# backend...");
+            
+            // Load initial bot status
+            if (BotControlService != null)
+            {
+                var status = await BotControlService.GetStatusAsync();
+                if (status != null)
+                {
+                    isBotRunning = status.State == TradingBotState.Running;
+                    currentSignal = status.State.ToString().ToUpper();
+                    signalBadgeClass = status.State == TradingBotState.Running ? "bg-success" : "bg-secondary";
+                    signalReason = status.State == TradingBotState.Running ? "Bot active - monitoring Binance" : "Bot stopped";
+                }
+            }
+            
+            // Load initial market data from C# API
+            await RefreshMarketData();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load initial data");
+        }
+    }
+    
+    private async Task RefreshMarketData()
+    {
+        try
+        {
+            // Fetch market data from C# backend API
+            var response = await Http.GetFromJsonAsync<MarketDataResponse>($"/api/dashboard/market-data/BTCUSDT");
+            if (response != null)
+            {
+                currentPrice = response.Price;
+                volume24h = response.Volume;
+                priceChangePercent = response.ChangePercent24h >= 0 ? $"+{response.ChangePercent24h:F2}" : $"{response.ChangePercent24h:F2}";
+                priceChangeClass = response.ChangePercent24h >= 0 ? "text-success" : "text-danger";
+                lastUpdateTime = DateTime.Now;
+                
+                // Update connection status
+                connectionStatusClass = "text-success";
+                connectionStatusText = "Connected";
+                
+                // Calculate indicators (placeholder - should be calculated by backend)
+                await CalculateIndicators(currentPrice);
+                
+                if (_isRendered)
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to refresh market data");
+            connectionStatusClass = "text-danger";
+            connectionStatusText = "Disconnected";
+        }
+    }
+    
+    private async Task LoadHistoricalData()
+    {
+        try
+        {
+            Logger.LogInformation("Loading historical data for charts...");
+            
+            // Generate sample data for now - in production, fetch from backend
+            var now = DateTime.Now;
+            chartTimestamps.Clear();
+            chartPrices.Clear();
+            chartKcUpper.Clear();
+            chartKcMiddle.Clear();
+            chartKcLower.Clear();
+            
+            var basePrice = currentPrice > 0 ? currentPrice : 67000m;
+            var random = new Random();
+            
+            for (int i = 99; i >= 0; i--)
+            {
+                var time = now.AddMinutes(-i * 5);
+                chartTimestamps.Add(time.ToString("HH:mm"));
+                
+                var variation = (decimal)(random.NextDouble() - 0.5) * basePrice * 0.002m;
+                var price = basePrice + variation;
+                chartPrices.Add(price);
+                
+                // Simple moving average and bands
+                var sma = price;
+                var band = basePrice * 0.01m;
+                chartKcMiddle.Add(sma);
+                chartKcUpper.Add(sma + band);
+                chartKcLower.Add(sma - band);
+            }
+            
+            // Update chart via JS interop
+            await UpdateChartDisplay();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load historical data");
+        }
+    }
+    
+    private async Task UpdateChartData()
+    {
+        if (!_isInitialized || !_jsAvailable || currentPrice <= 0) return;
+        
+        try
+        {
+            // Add new data point
+            var now = DateTime.Now;
+            if (chartTimestamps.Count > 100)
+            {
+                chartTimestamps.RemoveAt(0);
+                chartPrices.RemoveAt(0);
+                chartKcUpper.RemoveAt(0);
+                chartKcMiddle.RemoveAt(0);
+                chartKcLower.RemoveAt(0);
+            }
+            
+            chartTimestamps.Add(now.ToString("HH:mm"));
+            chartPrices.Add(currentPrice);
+            chartKcMiddle.Add(kcMiddle);
+            chartKcUpper.Add(kcUpper);
+            chartKcLower.Add(kcLower);
+            
+            // Update chart display
+            await UpdateChartDisplay();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to update chart data");
+        }
+    }
+    
+    private async Task UpdateChartDisplay()
+    {
+        // Only call JavaScript if it's safe to do so
+        if (!_jsAvailable || !_isRendered) return;
+        
+        try
+        {
+            var chartData = new
+            {
+                timestamps = chartTimestamps,
+                prices = chartPrices,
+                kcUpper = chartKcUpper,
+                kcMiddle = chartKcMiddle,
+                kcLower = chartKcLower
+            };
+            
+            await JSRuntime.InvokeVoidAsync("minimalTradingDashboard.updateChartData", chartData);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to update chart display");
+        }
+    }
+    
+    private async Task CalculateIndicators(decimal price)
+    {
+        // Simple indicator calculations - in production, these should come from backend
+        kcMiddle = price;
+        var band = price * 0.01m; // 1% band
+        kcUpper = kcMiddle + band;
+        kcLower = kcMiddle - band;
+        
+        ema20 = price; // Simplified
+        emaDirection = chartPrices.Count > 1 && price > chartPrices[^2] ? "up" : "down";
+        
+        atr = price * 0.005m; // 0.5% ATR
+        atrPercent = 0.5m;
+        
+        // Update signal based on price position
+        if (price > kcUpper)
+        {
+            currentSignal = "OVERBOUGHT";
+            signalReason = "Price above upper Keltner band";
+            signalBadgeClass = "bg-warning";
+        }
+        else if (price < kcLower)
+        {
+            currentSignal = "OVERSOLD";
+            signalReason = "Price below lower Keltner band";
+            signalBadgeClass = "bg-info";
+        }
+        else
+        {
+            currentSignal = "NEUTRAL";
+            signalReason = "Price within Keltner channel";
+            signalBadgeClass = "bg-secondary";
+        }
+        
+        await Task.CompletedTask;
+    }
+    
+    private async Task SetupSignalRConnection()
+    {
+        try
+        {
+            hubConnection = new HubConnectionBuilder()
+                .WithUrl(Navigation.ToAbsoluteUri("/tradinghub"))
+                .WithAutomaticReconnect()
+                .Build();
+            
+            hubConnection.On<MarketDataUpdateDto>("MarketDataUpdate", async (data) =>
+            {
+                currentPrice = data.Price;
+                volume24h = data.Volume;
+                await CalculateIndicators(currentPrice);
+                
+                if (_isRendered)
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+            });
+            
+            hubConnection.On<TradeSignalDto>("TradeSignal", async (signal) =>
+            {
+                recentSignals.Insert(0, new SignalData
+                {
+                    Type = signal.Type,
+                    Price = signal.Price,
+                    Time = signal.Timestamp,
+                    Reason = signal.Reason
+                });
+                
+                if (recentSignals.Count > 10)
+                {
+                    recentSignals.RemoveAt(recentSignals.Count - 1);
+                }
+                
+                if (_isRendered)
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+            });
+            
+            await hubConnection.StartAsync();
+            Logger.LogInformation("SignalR connection established");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to setup SignalR connection");
+        }
+    }
+    
+    // Button click handlers
+    private async Task ToggleBot()
+    {
+        isToggling = true;
+        StateHasChanged();
+        
+        try
+        {
+            if (isBotRunning)
+            {
+                await BotControlService.StopBotAsync();
+            }
+            else
+            {
+                var config = new TradingBotConfiguration
+                {
+                    Symbol = "BTCUSDT",
+                    PositionSize = positionSize,
+                    RiskPerTrade = riskPerTrade,
+                    PaperTradingMode = paperTradingMode
+                };
+                await BotControlService.StartBotAsync(config);
+            }
+            
+            isBotRunning = !isBotRunning;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to toggle bot");
+        }
+        finally
+        {
+            isToggling = false;
+            StateHasChanged();
+        }
+    }
+    
+    private async Task EmergencyStop()
+    {
+        try
+        {
+            await BotControlService.EmergencyStopAsync();
+            isBotRunning = false;
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to execute emergency stop");
+        }
+    }
+    
+    private async Task RefreshChart()
+    {
+        if (!_jsAvailable) return;
+        
+        isLoadingChart = true;
+        StateHasChanged();
+        
+        try
+        {
+            await LoadHistoricalData();
+        }
+        finally
+        {
+            isLoadingChart = false;
+            StateHasChanged();
+        }
+    }
+    
+    private async Task Select5M()
+    {
+        selectedTimeframe = "5M";
+        await RefreshChart();
+    }
+    
+    private async Task Select1H()
+    {
+        selectedTimeframe = "1H";
+        await RefreshChart();
+    }
+    
+    private async Task Select4H()
+    {
+        selectedTimeframe = "4H";
+        await RefreshChart();
+    }
+    
+    public async ValueTask DisposeAsync()
+    {
+        // Stop timers first
+        _dataRefreshTimer?.Dispose();
+        _chartUpdateTimer?.Dispose();
+        
+        // Dispose SignalR connection
+        if (hubConnection != null)
+        {
+            await hubConnection.DisposeAsync();
+        }
+        
+        // Only call JavaScript if it's safe to do so
+        if (_jsAvailable && _isRendered)
+        {
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("minimalTradingDashboard.dispose");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to dispose JavaScript components");
+            }
+        }
+    }
+    
+    // DTOs
+    private class MarketDataResponse
+    {
+        public string Symbol { get; set; } = string.Empty;
+        public decimal Price { get; set; }
+        public decimal Volume { get; set; }
+        public decimal Change24h { get; set; }
+        public decimal ChangePercent24h { get; set; }
+        public decimal High24h { get; set; }
+        public decimal Low24h { get; set; }
+    }
+    
+    private class SignalData
+    {
+        public string Type { get; set; } = string.Empty;
+        public decimal Price { get; set; }
+        public DateTime Time { get; set; }
+        public string? Reason { get; set; }
+    }
+    
+    private class MarketDataUpdateDto
+    {
+        public decimal Price { get; set; }
+        public decimal Volume { get; set; }
+        public DateTime Timestamp { get; set; }
+    }
+    
+    private class TradeSignalDto
+    {
+        public string Type { get; set; } = string.Empty;
+        public decimal Price { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string? Reason { get; set; }
+    }
+}
