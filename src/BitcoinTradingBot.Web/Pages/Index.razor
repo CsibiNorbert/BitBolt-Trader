@@ -404,7 +404,7 @@
     
     // Chart State
     private string selectedTimeframe = "5M";
-    private Timer? _dataRefreshTimer;
+    // Timer for chart updates (SignalR handles market data)
     private Timer? _chartUpdateTimer;
     
     // Indicators - Real-time calculated from Binance data
@@ -547,34 +547,25 @@
     
     private void StartTimers()
     {
-        // Setup timers for periodic updates - only after component is fully rendered
-        // Start immediately (TimeSpan.Zero) then refresh every 2 seconds for faster updates
-        _dataRefreshTimer = new Timer(async _ => 
+        // Only start chart update timer - SignalR handles real-time market data
+        // Chart updates every 3 seconds for responsive UI
+        _chartUpdateTimer = new Timer(_ => 
         {
-            try
+            // Use Task.Run to properly handle async operations in Timer callback
+            _ = Task.Run(async () =>
             {
-                await RefreshMarketData();
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError(ex, "Timer-based market data refresh failed");
-            }
-        }, null, TimeSpan.Zero, TimeSpan.FromSeconds(2));
-        
-        // Chart updates every 3 seconds instead of 5 for more responsive UI
-        _chartUpdateTimer = new Timer(async _ => 
-        {
-            try
-            {
-                await UpdateChartData();
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError(ex, "Timer-based chart update failed");
-            }
+                try
+                {
+                    await UpdateChartData();
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError(ex, "Timer-based chart update failed");
+                }
+            });
         }, null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
         
-        Logger.LogInformation("BitBolt Trader timers started - 2s market data, 3s chart updates");
+        Logger.LogInformation("BitBolt Trader chart timer started - SignalR handles market data");
     }
     
     private async Task LoadInitialDataAsync()
@@ -600,8 +591,8 @@
                 }
             }
             
-            // Load initial market data from C# API
-            await RefreshMarketData();
+            // Load initial market data from C# API (one-time only, then SignalR takes over)
+            await LoadInitialMarketData();
             
             Logger.LogInformation("Initial data loaded successfully");
         }
@@ -613,63 +604,55 @@
         }
     }
     
-    private async Task RefreshMarketData()
+    private async Task LoadInitialMarketData()
     {
         try
         {
-            // Fetch market data from BitBolt backend API
-            var response = await Http.GetFromJsonAsync<MarketDataResponse>($"/api/dashboard/market-data/BTCUSDT");
-            if (response != null && response.Price > 0)
+            // Fetch initial market data from BitBolt backend API (one-time only)
+            var response = await Http.GetAsync($"/api/dashboard/market-data/BTCUSDT");
+            if (response.IsSuccessStatusCode)
             {
-                currentPrice = response.Price;
-                volume24h = response.Volume;
-                priceChangePercent = response.ChangePercent24h >= 0 ? $"+{response.ChangePercent24h:F2}" : $"{response.ChangePercent24h:F2}";
-                priceChangeClass = response.ChangePercent24h >= 0 ? "text-success" : "text-danger";
-                lastUpdateTime = DateTime.Now;
+                var jsonResponse = await response.Content.ReadAsStringAsync();
+                var data = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(jsonResponse);
                 
-                // Update connection status to show we're connected
-                connectionStatusClass = "text-success";
-                connectionStatusText = "Connected";
-                
-                // Calculate indicators (placeholder - should be calculated by backend)
-                await CalculateIndicators(currentPrice);
-                
-                // Only update UI if component is rendered
-                if (_isRendered)
+                if (data != null && data.ContainsKey("Price"))
                 {
-                    await InvokeAsync(StateHasChanged);
+                    // Parse the API response structure with null safety
+                    currentPrice = decimal.Parse(data["Price"]?.ToString() ?? "0");
+                    volume24h = decimal.Parse(data["Volume"]?.ToString() ?? "0");
+                    var changePercent = decimal.Parse(data["ChangePercent24h"]?.ToString() ?? "0");
+                    priceChangePercent = changePercent >= 0 ? $"+{changePercent:F2}" : $"{changePercent:F2}";
+                    priceChangeClass = changePercent >= 0 ? "text-success" : "text-danger";
+                    lastUpdateTime = DateTime.Now;
+                    
+                    // Set initial connection status - SignalR will take over from here
+                    connectionStatusClass = "text-info";
+                    connectionStatusText = "Initial Load Complete";
+                    
+                    // Calculate indicators
+                    await CalculateIndicators(currentPrice);
+                    
+                    Logger.LogInformation($"Initial market data loaded: BTC ${currentPrice:N2}");
                 }
-                
-                Logger.LogDebug($"Market data updated: BTC ${currentPrice:N2}");
+                else
+                {
+                    Logger.LogWarning("Invalid market data response structure");
+                    connectionStatusClass = "text-warning";
+                    connectionStatusText = "Invalid Data";
+                }
             }
             else
             {
-                Logger.LogWarning("Received empty or invalid market data response");
+                Logger.LogWarning("Failed to load initial market data: {StatusCode}", response.StatusCode);
                 connectionStatusClass = "text-warning";
-                connectionStatusText = "No Data";
-            }
-        }
-        catch (HttpRequestException httpEx)
-        {
-            Logger.LogError(httpEx, "Network error while fetching market data");
-            connectionStatusClass = "text-danger";
-            connectionStatusText = "Network Error";
-            
-            if (_isRendered)
-            {
-                await InvokeAsync(StateHasChanged);
+                connectionStatusText = "Load Failed";
             }
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Failed to refresh market data");
-            connectionStatusClass = "text-danger";
-            connectionStatusText = "Disconnected";
-            
-            if (_isRendered)
-            {
-                await InvokeAsync(StateHasChanged);
-            }
+            Logger.LogError(ex, "Failed to load initial market data");
+            connectionStatusClass = "text-warning";
+            connectionStatusText = "Load Error";
         }
     }
     
@@ -820,13 +803,28 @@
             
             hubConnection.On<MarketDataUpdateDto>("MarketDataUpdate", async (data) =>
             {
-                currentPrice = data.Price;
-                volume24h = data.Volume;
-                await CalculateIndicators(currentPrice);
-                
-                if (_isRendered)
+                try
                 {
-                    await InvokeAsync(StateHasChanged);
+                    currentPrice = data.Price;
+                    volume24h = data.Volume;
+                    lastUpdateTime = DateTime.Now;
+                    
+                    // Update connection status when receiving SignalR data
+                    connectionStatusClass = "text-success";
+                    connectionStatusText = "Connected";
+                    
+                    await CalculateIndicators(currentPrice);
+                    
+                    if (_isRendered)
+                    {
+                        await InvokeAsync(StateHasChanged);
+                    }
+                    
+                    Logger.LogDebug($"SignalR market data updated: BTC ${currentPrice:N2}");
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError(ex, "Failed to process SignalR market data update");
                 }
             });
             
@@ -850,6 +848,43 @@
                     await InvokeAsync(StateHasChanged);
                 }
             });
+            
+            // Set up connection state change monitoring
+            hubConnection.Closed += async (error) =>
+            {
+                Logger.LogWarning("SignalR connection closed: {Error}", error?.Message);
+                connectionStatusClass = "text-danger";
+                connectionStatusText = "Disconnected";
+                
+                if (_isRendered)
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+            };
+            
+            hubConnection.Reconnecting += async (error) =>
+            {
+                Logger.LogInformation("SignalR reconnecting: {Error}", error?.Message);
+                connectionStatusClass = "text-warning";
+                connectionStatusText = "Reconnecting...";
+                
+                if (_isRendered)
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+            };
+            
+            hubConnection.Reconnected += async (connectionId) =>
+            {
+                Logger.LogInformation("SignalR reconnected: {ConnectionId}", connectionId);
+                connectionStatusClass = "text-success";
+                connectionStatusText = "Connected";
+                
+                if (_isRendered)
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+            };
             
             await hubConnection.StartAsync();
             Logger.LogInformation("SignalR connection established");
@@ -949,8 +984,7 @@
     
     public async ValueTask DisposeAsync()
     {
-        // Stop timers first
-        _dataRefreshTimer?.Dispose();
+        // Stop chart timer
         _chartUpdateTimer?.Dispose();
         
         // Dispose SignalR connection
