@@ -34,24 +34,76 @@ public class RealTimeMarketDataService : BackgroundService
         _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
         
         _marketDataTimer = new Timer(MarketDataIntervalMs);
-        _marketDataTimer.Elapsed += async (sender, e) => await FetchAndBroadcastMarketData();
+        _marketDataTimer.Elapsed += async (sender, e) => 
+        {
+            try
+            {
+                await FetchAndBroadcastMarketData();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in market data timer event handler");
+            }
+        };
         
         _performanceTimer = new Timer(PerformanceIntervalMs);
-        _performanceTimer.Elapsed += async (sender, e) => await BroadcastPerformanceMetrics();
+        _performanceTimer.Elapsed += async (sender, e) => 
+        {
+            try
+            {
+                await BroadcastPerformanceMetrics();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in performance timer event handler");
+            }
+        };
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("RealTimeMarketDataService starting...");
         
-        // Initial delay to let services initialize
-        await Task.Delay(5000, stoppingToken);
-        
-        _marketDataTimer.Start();
-        _performanceTimer.Start();
-        
-        // Keep service running
-        await Task.Delay(Timeout.Infinite, stoppingToken);
+        try
+        {
+            // Initial delay to let services initialize
+            await Task.Delay(5000, stoppingToken);
+            
+            _marketDataTimer.Start();
+            _performanceTimer.Start();
+            
+            _logger.LogInformation("RealTimeMarketDataService started successfully");
+            
+            // Keep service running until cancellation is requested
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(1000, stoppingToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected when service is stopping
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected when service is stopping
+            _logger.LogInformation("RealTimeMarketDataService cancellation requested");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "RealTimeMarketDataService encountered an error");
+            throw;
+        }
+        finally
+        {
+            _marketDataTimer?.Stop();
+            _performanceTimer?.Stop();
+            _logger.LogInformation("RealTimeMarketDataService stopped");
+        }
     }
 
     private async Task FetchAndBroadcastMarketData()

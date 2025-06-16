@@ -30,7 +30,85 @@
 
     <script src="_framework/blazor.server.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/7.0.0/signalr.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.min.js"></script>
-    <script src="js/trading-dashboard-minimal.js"></script>
+    <!-- TradingView Lightweight Charts -->
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    
+    <script>
+        let chart = null;
+        let candlestickSeries = null;
+        
+        window.initializeTradingViewChart = function(containerId, data) {
+            try {
+                const container = document.getElementById(containerId);
+                if (!container) {
+                    console.error('Chart container not found:', containerId);
+                    return;
+                }
+                
+                // Create chart
+                chart = LightweightCharts.createChart(container, {
+                    width: container.clientWidth,
+                    height: container.clientHeight,
+                    layout: {
+                        background: { type: 'solid', color: '#1a1a1a' },
+                        textColor: '#d1d4dc',
+                    },
+                    grid: {
+                        vertLines: { color: '#2B2B43' },
+                        horzLines: { color: '#2B2B43' },
+                    },
+                    crosshair: {
+                        mode: LightweightCharts.CrosshairMode.Normal,
+                    },
+                    rightPriceScale: {
+                        borderColor: '#485c7b',
+                    },
+                    timeScale: {
+                        borderColor: '#485c7b',
+                        timeVisible: true,
+                        secondsVisible: false,
+                    },
+                });
+                
+                // Add candlestick series
+                candlestickSeries = chart.addCandlestickSeries({
+                    upColor: '#26a69a',
+                    downColor: '#ef5350',
+                    borderVisible: false,
+                    wickUpColor: '#26a69a',
+                    wickDownColor: '#ef5350',
+                });
+                
+                // Set initial data
+                if (data && data.length > 0) {
+                    candlestickSeries.setData(data);
+                }
+                
+                // Handle resize
+                window.addEventListener('resize', () => {
+                    if (chart && container) {
+                        chart.applyOptions({
+                            width: container.clientWidth,
+                            height: container.clientHeight,
+                        });
+                    }
+                });
+                
+                console.log('TradingView chart initialized successfully');
+            } catch (error) {
+                console.error('Failed to initialize TradingView chart:', error);
+            }
+        };
+        
+        window.updateTradingViewChart = function(newData) {
+            try {
+                if (candlestickSeries && newData) {
+                    candlestickSeries.update(newData);
+                }
+            } catch (error) {
+                console.error('Failed to update TradingView chart:', error);
+            }
+        };
+    </script>
 </body>
 </html>

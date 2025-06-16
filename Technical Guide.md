@@ -219,16 +219,66 @@ For your specific implementation, **Blazor components structure** includes:
 - `PositionManager.razor` - Active position monitoring and management
 - `AlertPanel.razor` - Signal notifications and system alerts
 
-Real-time charting integration options include **Radzen Blazor Charts** for native Blazor components with zero JavaScript, **Chart.js via JS Interop** for lightweight, responsive charts, and **TradingView Lightweight Charts** for professional-grade technical analysis. Implementation example:
+## Real-Time Charting with ApexCharts
+
+Real-time charting integration uses **ApexCharts.Blazor** for professional-grade financial charts with excellent real-time performance, providing strongly-typed C# wrapper that eliminates JavaScript interop complexity. The implementation uses bar charts to simulate candlestick visualization with green/red bars for bullish/bearish periods.
+
+### Candlestick-Style Bar Chart Implementation
 
 ```csharp
 @page "/trading-dashboard"
 @using Microsoft.AspNetCore.SignalR.Client
+@using ApexCharts
 @implements IAsyncDisposable
 
 <div class="trading-dashboard">
     <div class="chart-container">
-        <canvas id="keltnerChart" @ref="chartElement"></canvas>
+        <ApexChart TItem="CandlestickDataPoint"
+                 Title="BTC/USDT - Keltner Channel Strategy"
+                 Options="@chartOptions"
+                 @ref="@mainChart"
+                 Height="500">
+            <!-- Green bars for bullish candles -->
+            <ApexPointSeries TItem="CandlestickDataPoint"
+                           Items="@GetBullishCandles()"
+                           Name="Bullish Candles"
+                           SeriesType="SeriesType.Bar"
+                           XValue="@(e => e.Timestamp)"
+                           YValue="@(e => Math.Max(e.Open, e.Close))"
+                           Color="#00B746" />
+            
+            <!-- Red bars for bearish candles -->
+            <ApexPointSeries TItem="CandlestickDataPoint"
+                           Items="@GetBearishCandles()"
+                           Name="Bearish Candles"
+                           SeriesType="SeriesType.Bar"
+                           XValue="@(e => e.Timestamp)"
+                           YValue="@(e => Math.Max(e.Open, e.Close))"
+                           Color="#EF403C" />
+            
+            <!-- Keltner Channel Indicators -->
+            <ApexPointSeries TItem="ChartDataPoint"
+                           Items="chartData"
+                           Name="Keltner Upper"
+                           SeriesType="SeriesType.Line"
+                           XValue="@(e => e.Timestamp)"
+                           YValue="@(e => e.KcUpper)"
+                           Color="#dc3545" />
+            <ApexPointSeries TItem="ChartDataPoint"
+                           Items="chartData"
+                           Name="Keltner Middle"
+                           SeriesType="SeriesType.Line"
+                           XValue="@(e => e.Timestamp)"
+                           YValue="@(e => e.KcMiddle)"
+                           Color="#ffc107" />
+            <ApexPointSeries TItem="ChartDataPoint"
+                           Items="chartData"
+                           Name="Keltner Lower"
+                           SeriesType="SeriesType.Line"
+                           XValue="@(e => e.Timestamp)"
+                           YValue="@(e => e.KcLower)"
+                           Color="#28a745" />
+        </ApexChart>
     </div>
     <div class="controls">
         <button @onclick="ToggleBot" class="@(IsBotRunning ? "btn-danger" : "btn-success")">
@@ -244,9 +294,15 @@ Real-time charting integration options include **Radzen Blazor Charts** for nati
 @code {
     private HubConnection? hubConnection;
     private bool IsBotRunning = false;
+    private List<ChartDataPoint> chartData = new();
+    private List<CandlestickDataPoint> candlestickDataPoints = new();
+    private ApexChart<CandlestickDataPoint>? mainChart;
+    private ApexChartOptions<CandlestickDataPoint> chartOptions = new();
     
     protected override async Task OnInitializedAsync()
     {
+        InitializeChartOptions();
+        
         hubConnection = new HubConnectionBuilder()
             .WithUrl(Navigation.ToAbsoluteUri("/tradinghub"))
             .Build();
@@ -256,6 +312,49 @@ Real-time charting integration options include **Radzen Blazor Charts** for nati
         
         await hubConnection.StartAsync();
     }
+
+    private void InitializeChartOptions()
+    {
+        chartOptions.Chart = new Chart
+        {
+            Type = ChartType.Bar,
+            Height = 500,
+            Animations = new Animations { Enabled = false }
+        };
+        
+        chartOptions.PlotOptions = new PlotOptions
+        {
+            Bar = new PlotOptionsBar
+            {
+                ColumnWidth = "60%"
+            }
+        };
+        
+        chartOptions.Colors = new List<string> { "#00B746", "#EF403C", "#dc3545", "#ffc107", "#28a745" };
+        chartOptions.Stroke = new Stroke { Width = new List<int> { 2, 2, 2, 2, 2 }, Curve = Curve.Straight };
+    }
+    
+    // Helper methods for candlestick visualization
+    private List<CandlestickDataPoint> GetBullishCandles()
+    {
+        return candlestickDataPoints.Where(c => c.Close >= c.Open).ToList();
+    }
+
+    private List<CandlestickDataPoint> GetBearishCandles()
+    {
+        return candlestickDataPoints.Where(c => c.Close < c.Open).ToList();
+    }
+
+    public class CandlestickDataPoint
+    {
+        public string Timestamp { get; set; } = string.Empty;
+        public decimal Open { get; set; }
+        public decimal High { get; set; }
+        public decimal Low { get; set; }
+        public decimal Close { get; set; }
+    }
+
+    public class ChartDataPoint
 }
 
 ## Complete implementation roadmap for your Keltner Channel strategy
@@ -353,7 +452,7 @@ public class KeltnerChannelStrategy : ITradingStrategy
 **Phase 4: Blazor Dashboard (Week 4-5)**
 ```razor
 @page "/"
-@using ChartJs.Blazor
+@using Radzen.Blazor
 @inject ITradingService TradingService
 @inject IChartService ChartService
 
