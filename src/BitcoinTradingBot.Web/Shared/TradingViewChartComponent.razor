@@ -1,0 +1,239 @@
+@using TradingView.Blazor
+@using TradingView.Blazor.Models
+@inject TradingViewChartService ChartService
+@inject ILogger<TradingViewChartComponent> Logger
+@implements IAsyncDisposable
+
+<div class="tradingview-chart-container" style="height: @Height; width: 100%; position: relative;">
+    @if (IsLoading)
+    {
+        <div class="d-flex justify-content-center align-items-center h-100">
+            <div class="text-center">
+                <div class="spinner-border text-primary mb-3" role="status">
+                    <span class="visually-hidden">Loading chart...</span>
+                </div>
+                <p class="text-muted">Loading @Title chart data...</p>
+            </div>
+        </div>
+    }
+    else if (HasError)
+    {
+        <div class="d-flex justify-content-center align-items-center h-100">
+            <div class="text-center text-danger">
+                <i class="fas fa-exclamation-triangle fa-3x mb-3"></i>
+                <h5>Chart Error</h5>
+                <p>@ErrorMessage</p>
+                <button class="btn btn-outline-primary btn-sm" @onclick="RefreshChart">
+                    <i class="fas fa-retry me-1"></i>Retry
+                </button>
+            </div>
+        </div>
+    }
+    else
+    {
+        <TradingViewChart @ref="TradingChart" />
+    }
+</div>
+
+@code {
+    [Parameter] public string Title { get; set; } = "BTC/USDT";
+    [Parameter] public string Height { get; set; } = "500px";
+    [Parameter] public string Symbol { get; set; } = "BTCUSDT";
+    [Parameter] public EventCallback<string> OnTimeframeChanged { get; set; }
+    [Parameter] public EventCallback OnChartReady { get; set; }
+
+    private TradingViewChart? TradingChart;
+    private bool IsLoading = true;
+    private bool HasError = false;
+    private string ErrorMessage = string.Empty;
+    private Timer? _updateTimer;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await InitializeChart();
+        }
+    }
+
+    private async Task InitializeChart()
+    {
+        try
+        {
+            IsLoading = true;
+            HasError = false;
+            StateHasChanged();
+
+            // Wait a moment for the DOM to be ready
+            await Task.Delay(100);
+
+            // Generate sample data for initial display
+            ChartService.GenerateSampleData(100, 67000m);
+            var chartData = ChartService.GetChartData();
+
+            if (TradingChart != null && chartData != null)
+            {
+                // Configure chart options for professional trading appearance
+                var options = new ChartOptions
+                {
+                    Width = -75, // Responsive width
+                    Height = 500,
+                    TimeScaleSecondsVisible = false,
+                    
+                    // Chart appearance customization
+                    CustomChartDefinitions = new Dictionary<string, object>
+                    {
+                        ["layout"] = new {
+                            background = new { type = "solid", color = "#1a1a1a" },
+                            textColor = "#d1d4dc"
+                        },
+                        ["grid"] = new {
+                            vertLines = new { color = "#2B2B43" },
+                            horzLines = new { color = "#2B2B43" }
+                        },
+                        ["crosshair"] = new {
+                            mode = 1 // Normal crosshair mode
+                        },
+                        ["rightPriceScale"] = new {
+                            borderColor = "#485c7b"
+                        },
+                        ["timeScale"] = new {
+                            borderColor = "#485c7b",
+                            timeVisible = true,
+                            secondsVisible = false
+                        }
+                    },
+                    
+                    // Candlestick series styling
+                    CustomCandleSeriesDefinitions = new Dictionary<string, object>
+                    {
+                        ["upColor"] = "#26a69a",
+                        ["downColor"] = "#ef5350",
+                        ["borderVisible"] = false,
+                        ["wickUpColor"] = "#26a69a",
+                        ["wickDownColor"] = "#ef5350"
+                    }
+                };
+
+                // Load the chart with data and options
+                await TradingChart.LoadChartAsync(chartData, options);
+
+                Logger.LogInformation("TradingView chart initialized successfully with {DataCount} candlesticks", 
+                    ChartService.GetDataCount());
+
+                // Start real-time updates
+                StartUpdateTimer();
+
+                // Notify parent component
+                await OnChartReady.InvokeAsync();
+            }
+
+            IsLoading = false;
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to initialize TradingView chart: {ErrorMessage}", ex.Message);
+            HasError = true;
+            ErrorMessage = $"Failed to initialize chart: {ex.Message}";
+            IsLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private void StartUpdateTimer()
+    {
+        // Update chart every 5 seconds with new price data
+        _updateTimer = new Timer(async _ =>
+        {
+            try
+            {
+                if (TradingChart != null)
+                {
+                    // Generate realistic price updates
+                    var random = new Random();
+                    var currentPrice = 67000m + (decimal)(random.NextDouble() * 2000 - 1000);
+                    var volume = (decimal)(random.NextDouble() * 100 + 50);
+                    
+                    ChartService.UpdateLatestCandle(currentPrice, volume);
+                    
+                    var updatedData = ChartService.GetChartData();
+                    await InvokeAsync(async () =>
+                    {
+                        if (TradingChart != null && updatedData != null)
+                        {
+                            await TradingChart.UpdateChartAsync(updatedData);
+                        }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Error updating chart data: {ErrorMessage}", ex.Message);
+            }
+        }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    public async Task RefreshChart()
+    {
+        try
+        {
+            HasError = false;
+            await InitializeChart();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to refresh chart: {ErrorMessage}", ex.Message);
+            HasError = true;
+            ErrorMessage = $"Failed to refresh chart: {ex.Message}";
+            StateHasChanged();
+        }
+    }
+
+    public async Task UpdateChartData(ChartData newData)
+    {
+        try
+        {
+            if (TradingChart != null && newData != null)
+            {
+                await TradingChart.UpdateChartAsync(newData);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to update chart data: {ErrorMessage}", ex.Message);
+        }
+    }
+
+    public async Task AddSignalMarker(string signalType, decimal price, string strategy = "Keltner")
+    {
+        try
+        {
+            var time = DateTime.UtcNow;
+            var text = $"{signalType} Signal";
+            ChartService.AddSignalMarker(time, price, signalType, strategy, text);
+            var updatedData = ChartService.GetChartData();
+            
+            if (TradingChart != null && updatedData != null)
+            {
+                await TradingChart.UpdateChartAsync(updatedData);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to add signal marker: {ErrorMessage}", ex.Message);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _updateTimer?.Dispose();
+        
+        if (TradingChart != null)
+        {
+            // TradingViewChart handles its own disposal
+        }
+        
+        Logger.LogDebug("TradingViewChartComponent disposed");
+    }
+} 
