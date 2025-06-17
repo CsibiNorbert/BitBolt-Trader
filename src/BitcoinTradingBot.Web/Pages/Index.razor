@@ -8,8 +8,8 @@
 @inject NavigationManager Navigation
 @inject ITradingBotControlService BotControlService
 @inject ILogger<Index> Logger
+@inject IHttpClientFactory HttpClientFactory
 @inject IServiceScopeFactory ServiceScopeFactory
-@inject HttpClient Http
 @implements IAsyncDisposable
 
 <PageTitle>BitBolt Trader - Keltner Channel Strategy</PageTitle>
@@ -418,8 +418,6 @@
     
     // Chart State
     private string selectedTimeframe = "5M";
-    // Timer for chart updates (SignalR handles market data)
-    private Timer? _chartUpdateTimer;
     
     // Indicators - Real-time calculated from Binance data
     private decimal kcUpper = 0m;
@@ -443,169 +441,46 @@
     private List<SignalData> recentSignals = new();
     
     // Component lifecycle state
-    private bool _isInitialized = false;
-    private bool _isRendered = false;
-    
+    private readonly CancellationTokenSource _cts = new();
+    private IJSObjectReference? _chartModule;
+
     protected override async Task OnInitializedAsync()
     {
         Logger.LogInformation("Initializing BitBolt Trader dashboard...");
-        
-        try
-        {
-            // Initialize TradingView chart options
-            InitializeTradingViewOptions();
-            
-            // Generate initial chart data for TradingView
-            GenerateInitialTradingViewData();
-            
-            // Set loading to false since we have initial data
-            isLoadingChart = false;
-            
-            // Set initial connection status
-            connectionStatusClass = "text-warning";
-            connectionStatusText = "Connecting...";
-            lastUpdateTime = DateTime.Now;
-            
-            // Start async initialization - don't block UI
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    // Setup SignalR connection in background
-                    await SetupSignalRConnection();
-                    
-                    // Load initial data from C# backend
-                    await LoadInitialDataAsync();
-                    
-                    _isInitialized = true;
-                    
-                    // Update UI on main thread
-                    await InvokeAsync(StateHasChanged);
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogError(ex, "Background initialization failed");
-                    connectionStatusClass = "text-danger";
-                    connectionStatusText = "Failed";
-                    currentSignal = "ERROR";
-                    signalReason = "Initialization failed: " + ex.Message;
-                    signalBadgeClass = "bg-danger";
-                    
-                    await InvokeAsync(StateHasChanged);
-                }
-            });
-            
-            // Set initial values for immediate display
-            connectionStatusClass = "text-warning";
-            connectionStatusText = "Connecting...";
-            currentSignal = "INITIALIZING";
-            signalReason = "Starting BitBolt Trader...";
-            signalBadgeClass = "bg-warning";
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "Failed to start initialization");
-            connectionStatusClass = "text-danger";
-            connectionStatusText = "Failed";
-        }
+        await SetupSignalRConnection();
+        await LoadInitialDataAsync();
     }
-    
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (firstRender)
         {
-            _isRendered = true;
             Logger.LogInformation("BitBolt Trader UI rendered, initializing components...");
-            
-            try
-            {
-                // Start timers immediately for data updates - don't wait for JS
-                StartTimers();
-                
-                // Load initial chart data for TradingView
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await Task.Delay(500); // Small delay to ensure DOM is ready
-                        
-                        // Load and display initial chart data for TradingView
-                        await LoadTradingViewChart();
-                        
-                        Logger.LogInformation("BitBolt Trader TradingView chart initialized successfully");
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.LogError(ex, "Failed to initialize TradingView chart");
-                    }
-                    finally
-                    {
-                        // Always set loading to false, even if there's an error
-                        isLoadingChart = false;
-                        await InvokeAsync(StateHasChanged);
-                    }
-                });
-                
-                Logger.LogInformation("BitBolt Trader components initialization started");
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError(ex, "Failed to start component initialization");
-                isLoadingChart = false;
-                StateHasChanged();
-            }
+            // Load the JS module
+            _chartModule = await JSRuntime.InvokeAsync<IJSObjectReference>("import", "./Pages/Index.razor.js");
+            await InitializeTradingViewChart();
+            Logger.LogInformation("BitBolt Trader components initialization started");
         }
     }
-    
-    private void StartTimers()
-    {
-        // Only start chart update timer - SignalR handles real-time market data
-        // Chart updates every 3 seconds for responsive UI
-        _chartUpdateTimer = new Timer(_ => 
-        {
-            // Use Task.Run to properly handle async operations in Timer callback
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await UpdateTradingViewChart();
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogError(ex, "Timer-based TradingView chart update failed");
-                }
-            });
-        }, null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
-        
-        Logger.LogInformation("BitBolt Trader chart timer started - SignalR handles market data");
-    }
-    
+
     private async Task LoadInitialDataAsync()
     {
+        Logger.LogInformation("Loading initial market data from BitBolt backend...");
+        connectionStatusClass = "text-info";
+        connectionStatusText = "Loading...";
+
         try
         {
-            Logger.LogInformation("Loading initial market data from BitBolt backend...");
-            
-            // Update connection status to show we're loading
-            connectionStatusClass = "text-info";
-            connectionStatusText = "Loading...";
-            
-            // Load initial bot status
-            if (BotControlService != null)
+            var botStatus = await BotControlService.GetStatusAsync();
+            if (botStatus != null)
             {
-                var status = await BotControlService.GetStatusAsync();
-                if (status != null)
-                {
-                    isBotRunning = status.State == TradingBotState.Running;
-                    currentSignal = status.State.ToString().ToUpper();
-                    signalBadgeClass = status.State == TradingBotState.Running ? "bg-success" : "bg-secondary";
-                    signalReason = status.State == TradingBotState.Running ? "Bot active - monitoring Binance" : "Bot stopped";
-                }
+                isBotRunning = botStatus.State == TradingBotState.Running;
+                currentSignal = botStatus.State.ToString().ToUpper();
+                signalBadgeClass = isBotRunning ? "bg-success" : "bg-secondary";
+                signalReason = isBotRunning ? "Bot active - monitoring Binance" : "Bot stopped";
             }
-            
-            // Load initial market data from C# API (one-time only, then SignalR takes over)
+
             await LoadInitialMarketData();
-            
             Logger.LogInformation("Initial data loaded successfully");
         }
         catch (Exception ex)
@@ -615,36 +490,37 @@
             connectionStatusText = "Error";
         }
     }
-    
+
     private async Task LoadInitialMarketData()
     {
         try
         {
-            // Fetch initial market data from BitBolt backend API (one-time only)
-            var response = await Http.GetAsync($"/api/dashboard/market-data/BTCUSDT");
+            var httpClient = HttpClientFactory.CreateClient();
+            var response = await httpClient.GetAsync($"{Navigation.BaseUri}api/dashboard/market-data/BTCUSDT", _cts.Token);
+
             if (response.IsSuccessStatusCode)
             {
-                var jsonResponse = await response.Content.ReadAsStringAsync();
-                var data = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(jsonResponse);
-                
-                if (data != null && data.ContainsKey("Price"))
+                var jsonResponse = await response.Content.ReadAsStringAsync(_cts.Token);
+                var data = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(jsonResponse);
+
+                if (data != null && data.TryGetValue("price", out var priceElement) && priceElement.TryGetDecimal(out var price))
                 {
-                    // Parse the API response structure with null safety
-                    currentPrice = decimal.Parse(data["Price"]?.ToString() ?? "0");
-                    volume24h = decimal.Parse(data["Volume"]?.ToString() ?? "0");
-                    var changePercent = decimal.Parse(data["ChangePercent24h"]?.ToString() ?? "0");
-                    priceChangePercent = changePercent >= 0 ? $"+{changePercent:F2}" : $"{changePercent:F2}";
-                    priceChangeClass = changePercent >= 0 ? "text-success" : "text-danger";
-                    lastUpdateTime = DateTime.Now;
+                    currentPrice = price;
+                    if (data.TryGetValue("volume", out var volumeElement) && volumeElement.TryGetDecimal(out var volume))
+                    {
+                        volume24h = volume;
+                    }
+                    if (data.TryGetValue("changePercent24h", out var changeElement) && changeElement.TryGetDecimal(out var changePercent))
+                    {
+                        priceChangePercent = changePercent >= 0 ? $"+{changePercent:F2}" : $"{changePercent:F2}";
+                        priceChangeClass = changePercent >= 0 ? "text-success" : "text-danger";
+                    }
                     
-                    // Set initial connection status - SignalR will take over from here
+                    lastUpdateTime = DateTime.Now;
                     connectionStatusClass = "text-info";
                     connectionStatusText = "Initial Load Complete";
-                    
-                    // Calculate indicators
                     await CalculateIndicators(currentPrice);
-                    
-                    Logger.LogInformation($"Initial market data loaded: BTC ${currentPrice:N2}");
+                    Logger.LogInformation("Initial market data loaded: BTC ${CurrentPrice:N2}", currentPrice);
                 }
                 else
                 {
@@ -660,57 +536,31 @@
                 connectionStatusText = "Load Failed";
             }
         }
+        catch (OperationCanceledException)
+        {
+            Logger.LogWarning("Initial market data load was cancelled.");
+        }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Failed to load initial market data");
-            connectionStatusClass = "text-warning";
+            connectionStatusClass = "text-danger";
             connectionStatusText = "Load Error";
         }
     }
-    
+
     private async Task LoadTradingViewChart()
     {
         try
         {
             Logger.LogInformation("Loading TradingView chart...");
-            
-            // Initialize TradingView chart with sample data
             await InitializeTradingViewChart();
-            
-            // Force UI update
-            if (_isRendered)
-            {
-                await InvokeAsync(StateHasChanged);
-            }
+            await InvokeAsync(StateHasChanged);
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Failed to load TradingView chart");
         }
     }
-    
-    private async Task UpdateChartData()
-    {
-        if (!_isInitialized || currentPrice <= 0) return;
-        
-        try
-        {
-            // Update TradingView chart data
-            await UpdateTradingViewChart();
-            
-            // Force UI update for real-time charts
-            if (_isRendered)
-            {
-                await InvokeAsync(StateHasChanged);
-            }
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "Failed to update chart data");
-        }
-    }
-    
-    // Removed UpdateChartDisplay as it's not needed with Radzen - charts update automatically when data changes
     
     private async Task CalculateIndicators(decimal price)
     {
@@ -772,10 +622,7 @@
                     
                     await CalculateIndicators(currentPrice);
                     
-                    if (_isRendered)
-                    {
-                        await InvokeAsync(StateHasChanged);
-                    }
+                    await InvokeAsync(StateHasChanged);
                     
                     Logger.LogDebug($"SignalR market data updated: BTC ${currentPrice:N2}");
                 }
@@ -800,10 +647,7 @@
                     recentSignals.RemoveAt(recentSignals.Count - 1);
                 }
                 
-                if (_isRendered)
-                {
-                    await InvokeAsync(StateHasChanged);
-                }
+                await InvokeAsync(StateHasChanged);
             });
             
             // Set up connection state change monitoring
@@ -813,10 +657,7 @@
                 connectionStatusClass = "text-danger";
                 connectionStatusText = "Disconnected";
                 
-                if (_isRendered)
-                {
-                    await InvokeAsync(StateHasChanged);
-                }
+                await InvokeAsync(StateHasChanged);
             };
             
             hubConnection.Reconnecting += async (error) =>
@@ -825,10 +666,7 @@
                 connectionStatusClass = "text-warning";
                 connectionStatusText = "Reconnecting...";
                 
-                if (_isRendered)
-                {
-                    await InvokeAsync(StateHasChanged);
-                }
+                await InvokeAsync(StateHasChanged);
             };
             
             hubConnection.Reconnected += async (connectionId) =>
@@ -837,18 +675,24 @@
                 connectionStatusClass = "text-success";
                 connectionStatusText = "Connected";
                 
-                if (_isRendered)
-                {
-                    await InvokeAsync(StateHasChanged);
-                }
+                await InvokeAsync(StateHasChanged);
             };
             
-            await hubConnection.StartAsync();
+            await hubConnection.StartAsync(_cts.Token);
             Logger.LogInformation("SignalR connection established");
+            
+            connectionStatusClass = "text-success";
+            connectionStatusText = "Connected";
+        }
+        catch (OperationCanceledException)
+        {
+            Logger.LogWarning("SignalR connection attempt was cancelled.");
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Failed to setup SignalR connection");
+            connectionStatusClass = "text-danger";
+            connectionStatusText = "Failed";
         }
     }
     
@@ -937,39 +781,39 @@
         await RefreshChart();
     }
 
-    // Initialize LightweightCharts options
-    private void InitializeTradingViewOptions()
-    {
-        try
-        {
-            Logger.LogInformation("LightweightCharts options initialized successfully");
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "Failed to initialize LightweightCharts options");
-        }
-    }
-
     // TradingView chart helper methods
     private async Task InitializeTradingViewChart()
     {
         try
         {
-            if (!chartInitialized)
+            isLoadingChart = true;
+            await InvokeAsync(StateHasChanged);
+            
+            // Generate sample data for initial paint
+            if (!chartData.Any())
             {
-                // Generate sample data
                 chartData = GenerateSampleCandlestickData();
-                
-                // Initialize chart with JavaScript
-                await JSRuntime.InvokeVoidAsync("initializeTradingViewChart", "tradingview-chart", chartData);
-                
+            }
+
+            if (_chartModule is not null)
+            {
+                await _chartModule.InvokeVoidAsync("initializeTradingViewChart", "tradingview-chart", chartData);
                 chartInitialized = true;
                 Logger.LogInformation("TradingView chart initialized with {Count} candlesticks", chartData.Count);
             }
         }
+        catch (JSException ex)
+        {
+            Logger.LogError(ex, "Failed to initialize TradingView chart via JS Interop: {Message}", ex.Message);
+        }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Failed to initialize TradingView chart: {Message}", ex.Message);
+            Logger.LogError(ex, "A general error occurred while initializing TradingView chart: {Message}", ex.Message);
+        }
+        finally
+        {
+            isLoadingChart = false;
+            await InvokeAsync(StateHasChanged);
         }
     }
 
@@ -1008,7 +852,7 @@
     {
         try
         {
-            if (chartInitialized && currentPrice > 0)
+            if (chartInitialized && currentPrice > 0 && _chartModule is not null)
             {
                 // Add new candlestick data point
                 var newCandle = new CandlestickData
@@ -1021,8 +865,13 @@
                 };
 
                 // Update chart with new data point
-                await JSRuntime.InvokeVoidAsync("updateTradingViewChart", newCandle);
+                await _chartModule.InvokeVoidAsync("updateTradingViewChart", "tradingview-chart", newCandle);
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // This is expected if the component is disposed, so we can ignore it or log as debug.
+            Logger.LogDebug("TradingView chart update was cancelled.");
         }
         catch (Exception ex)
         {
@@ -1030,46 +879,30 @@
         }
     }
 
-    // Generate initial demo data for TradingView
-    private void GenerateInitialTradingViewData()
-    {
-        try
-        {
-            // Use a default price if currentPrice is not set yet
-            var basePrice = currentPrice > 0 ? currentPrice : 67234.50m;
-            
-            chartData = GenerateSampleCandlestickData();
-            
-            // Update current price if it wasn't set
-            if (currentPrice <= 0 && chartData.Count > 0)
-            {
-                currentPrice = (decimal)chartData.Last().Close;
-                // Also update indicators based on the generated price
-                _ = Task.Run(async () => await CalculateIndicators(currentPrice));
-            }
-
-            Logger.LogInformation("Generated initial TradingView data with {CandleCount} candlesticks (base price: ${BasePrice:N2})", 
-                chartData.Count, basePrice);
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "Failed to generate initial TradingView data");
-        }
-    }
-    
     public async ValueTask DisposeAsync()
     {
-        // Stop chart timer
-        _chartUpdateTimer?.Dispose();
-        
-        // Dispose SignalR connection
-        if (hubConnection != null)
+        _cts.Cancel();
+
+        if (hubConnection is not null)
         {
+            await hubConnection.StopAsync();
             await hubConnection.DisposeAsync();
         }
+
+        if (_chartModule is not null)
+        {
+            try
+            {
+                await _chartModule.InvokeVoidAsync("disposeChart", "tradingview-chart");
+                await _chartModule.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Error disposing JS chart module.");
+            }
+        }
         
-        // TradingView chart cleanup - no explicit dispose needed
-        
+        _cts.Dispose();
         Logger.LogInformation("BitBolt Trader dashboard disposed");
     }
     

@@ -65,9 +65,6 @@ builder.Services.AddScoped<IPerformanceAnalyticsService, PerformanceAnalyticsSer
 // Add HttpClient for exchange integrations
 builder.Services.AddHttpClient();
 
-// Add HttpClient for Blazor components
-builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(builder.Configuration["BaseUrl"] ?? "https://localhost:5001/") });
-
 // Add MediatR for inter-module communication
 builder.Services.AddMediatR(cfg => 
 {
