@@ -69,47 +69,6 @@
     <div class="row">
         <!-- Chart Section -->
         <div class="col-lg-8">
-            <div class="card">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h5 class="mb-0">
-                        <i class="fas fa-chart-candlestick me-2"></i>
-                        BTC/USDT - Multi-Timeframe Analysis
-                    </h5>
-                    <div class="btn-group btn-group-sm" role="group">
-                        <button type="button" class="btn @(selectedTimeframe == "5M" ? "btn-primary" : "btn-outline-primary")" 
-                                @onclick="Select5M">5M</button>
-                        <button type="button" class="btn @(selectedTimeframe == "1H" ? "btn-primary" : "btn-outline-primary")" 
-                                @onclick="Select1H">1H</button>
-                        <button type="button" class="btn @(selectedTimeframe == "4H" ? "btn-primary" : "btn-outline-primary")" 
-                                @onclick="Select4H">4H</button>
-                        <button type="button" class="btn btn-outline-secondary" @onclick="RefreshChart">
-                            <i class="fas fa-sync"></i>
-                        </button>
-                    </div>
-                </div>
-                <div class="card-body p-0">
-                    <!-- TradingView Chart Container -->
-                    <div style="height: 500px; width: 100%; position: relative;">
-                        @if (isLoadingChart)
-                        {
-                            <div class="d-flex justify-content-center align-items-center h-100">
-                                <div class="text-center">
-                                    <div class="spinner-border text-primary mb-3" role="status">
-                                        <span class="visually-hidden">Loading chart...</span>
-                                    </div>
-                                    <p class="text-muted">Loading @selectedTimeframe chart data from Binance...</p>
-                                </div>
-                            </div>
-                        }
-                        else
-                        {
-                            <!-- TradingView Professional Candlestick Chart -->
-                            <div id="tradingview-chart" style="height: 500px; width: 100%;"></div>
-                        }
-                    </div>
-                </div>
-            </div>
-
             <!-- Indicators Panel -->
             <div class="card mt-3">
                 <div class="card-header">
@@ -390,13 +349,12 @@
 </style>
 
 @code {
-    // TradingView Chart Components  
-    private List<CandlestickData> chartData = new();
-    private bool chartInitialized = false;
+    // Component lifecycle state
+    private readonly CancellationTokenSource _cts = new();
 
     // SignalR Connection
     private HubConnection? hubConnection;
-    
+
     // Market Data - Now real-time from Binance via C# backend
     private decimal currentPrice = 0m;
     private string priceChangePercent = "0.00";
@@ -439,28 +397,12 @@
     
     // Recent Signals - Real from strategy engine
     private List<SignalData> recentSignals = new();
-    
-    // Component lifecycle state
-    private readonly CancellationTokenSource _cts = new();
-    private IJSObjectReference? _chartModule;
 
     protected override async Task OnInitializedAsync()
     {
         Logger.LogInformation("Initializing BitBolt Trader dashboard...");
         await SetupSignalRConnection();
         await LoadInitialDataAsync();
-    }
-
-    protected override async Task OnAfterRenderAsync(bool firstRender)
-    {
-        if (firstRender)
-        {
-            Logger.LogInformation("BitBolt Trader UI rendered, initializing components...");
-            // Load the JS module
-            _chartModule = await JSRuntime.InvokeAsync<IJSObjectReference>("import", "./Pages/Index.razor.js");
-            await InitializeTradingViewChart();
-            Logger.LogInformation("BitBolt Trader components initialization started");
-        }
     }
 
     private async Task LoadInitialDataAsync()
@@ -548,20 +490,6 @@
         }
     }
 
-    private async Task LoadTradingViewChart()
-    {
-        try
-        {
-            Logger.LogInformation("Loading TradingView chart...");
-            await InitializeTradingViewChart();
-            await InvokeAsync(StateHasChanged);
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "Failed to load TradingView chart");
-        }
-    }
-    
     private async Task CalculateIndicators(decimal price)
     {
         // Simple indicator calculations - in production, these should come from backend
@@ -571,7 +499,7 @@
         kcLower = kcMiddle - band;
         
         ema20 = price; // Simplified
-        emaDirection = chartData.Count > 1 && price > (decimal)chartData[^2].Close ? "up" : "down";
+        emaDirection = "unknown";
         
         atr = price * 0.005m; // 0.5% ATR
         atrPercent = 0.5m;
@@ -746,138 +674,6 @@
             Logger.LogError(ex, "Failed to execute emergency stop");
         }
     }
-    
-    private async Task RefreshChart()
-    {
-        isLoadingChart = true;
-        StateHasChanged();
-        
-        try
-        {
-            await LoadTradingViewChart();
-        }
-        finally
-        {
-            isLoadingChart = false;
-            StateHasChanged();
-        }
-    }
-    
-    private async Task Select5M()
-    {
-        selectedTimeframe = "5M";
-        await RefreshChart();
-    }
-    
-    private async Task Select1H()
-    {
-        selectedTimeframe = "1H";
-        await RefreshChart();
-    }
-    
-    private async Task Select4H()
-    {
-        selectedTimeframe = "4H";
-        await RefreshChart();
-    }
-
-    // TradingView chart helper methods
-    private async Task InitializeTradingViewChart()
-    {
-        try
-        {
-            isLoadingChart = true;
-            await InvokeAsync(StateHasChanged);
-            
-            // Generate sample data for initial paint
-            if (!chartData.Any())
-            {
-                chartData = GenerateSampleCandlestickData();
-            }
-
-            if (_chartModule is not null)
-            {
-                await _chartModule.InvokeVoidAsync("initializeTradingViewChart", "tradingview-chart", chartData);
-                chartInitialized = true;
-                Logger.LogInformation("TradingView chart initialized with {Count} candlesticks", chartData.Count);
-            }
-        }
-        catch (JSException ex)
-        {
-            Logger.LogError(ex, "Failed to initialize TradingView chart via JS Interop: {Message}", ex.Message);
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "A general error occurred while initializing TradingView chart: {Message}", ex.Message);
-        }
-        finally
-        {
-            isLoadingChart = false;
-            await InvokeAsync(StateHasChanged);
-        }
-    }
-
-    private List<CandlestickData> GenerateSampleCandlestickData()
-    {
-        var data = new List<CandlestickData>();
-        var basePrice = currentPrice > 0 ? currentPrice : 45000m;
-        var random = new Random();
-        
-        for (int i = 50; i >= 0; i--)
-        {
-            var time = DateTimeOffset.Now.AddMinutes(-i * 5).ToUnixTimeSeconds();
-            var price = basePrice + (decimal)(random.NextDouble() * 2000 - 1000);
-            var volatility = (decimal)(random.NextDouble() * 500);
-            
-            var open = price;
-            var close = price + (decimal)(random.NextDouble() * 200 - 100);
-            var high = Math.Max(open, close) + volatility * 0.5m;
-            var low = Math.Min(open, close) - volatility * 0.5m;
-            
-            data.Add(new CandlestickData
-            {
-                Time = time,
-                Open = (double)open,
-                High = (double)high,
-                Low = (double)low,
-                Close = (double)close
-            });
-        }
-        
-        return data;
-    }
-
-    // Update TradingView chart data  
-    private async Task UpdateTradingViewChart()
-    {
-        try
-        {
-            if (chartInitialized && currentPrice > 0 && _chartModule is not null)
-            {
-                // Add new candlestick data point
-                var newCandle = new CandlestickData
-                {
-                    Time = DateTimeOffset.Now.ToUnixTimeSeconds(),
-                    Open = (double)currentPrice,
-                    High = (double)(currentPrice * 1.001m),
-                    Low = (double)(currentPrice * 0.999m),
-                    Close = (double)currentPrice
-                };
-
-                // Update chart with new data point
-                await _chartModule.InvokeVoidAsync("updateTradingViewChart", "tradingview-chart", newCandle);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // This is expected if the component is disposed, so we can ignore it or log as debug.
-            Logger.LogDebug("TradingView chart update was cancelled.");
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "Failed to update TradingView chart: {Message}", ex.Message);
-        }
-    }
 
     public async ValueTask DisposeAsync()
     {
@@ -889,19 +685,6 @@
             await hubConnection.DisposeAsync();
         }
 
-        if (_chartModule is not null)
-        {
-            try
-            {
-                await _chartModule.InvokeVoidAsync("disposeChart", "tradingview-chart");
-                await _chartModule.DisposeAsync();
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError(ex, "Error disposing JS chart module.");
-            }
-        }
-        
         _cts.Dispose();
         Logger.LogInformation("BitBolt Trader dashboard disposed");
     }
@@ -939,14 +722,5 @@
         public decimal Price { get; set; }
         public DateTime Timestamp { get; set; }
         public string? Reason { get; set; }
-    }
-    
-    private class CandlestickData
-    {
-        public long Time { get; set; }
-        public double Open { get; set; }
-        public double High { get; set; }
-        public double Low { get; set; }
-        public double Close { get; set; }
     }
 }

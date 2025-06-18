@@ -53,9 +53,6 @@ builder.Services.AddScoped<BitcoinTradingBot.Core.Interfaces.ITradingHubService,
 builder.Services.AddHostedService<RealTimeMarketDataService>();
 builder.Services.AddScoped<ITradingBotControlService, TradingBotControlService>();
 
-// Add TradingView chart service for real-time charting
-builder.Services.AddScoped<TradingViewChartService>();
-
 // Add module-specific services with proper interfaces
 builder.Services.AddScoped<IStrategyService, StrategyService>();
 builder.Services.AddScoped<IRiskManagementService, RiskManagementService>();
